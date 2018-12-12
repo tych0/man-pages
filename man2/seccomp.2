@@ -228,6 +228,13 @@ An administrator may override this filter flag by preventing specific
 actions from being logged via the
 .IR /proc/sys/kernel/seccomp/actions_logged
 file.
+.TP
+.BR SECCOMP_FILTER_FLAG_NEW_LISTENER " (since Linux 4.21)"
+With this flag, a new userspace notification fd is returned on success. When
+this filter returns
+.BR SECCOMP_RET_USER_NOTIF
+a notification will be sent to this fd. See "Userspace Notification" below for
+more details.
 .RE
 .TP
 .BR SECCOMP_GET_ACTION_AVAIL " (since Linux 4.14)"
@@ -606,6 +613,17 @@ file.
 .TP
 .BR SECCOMP_RET_ALLOW
 This value results in the system call being executed.
+.TP
+.BR SECCOMP_RET_USER_NOTIF " (since Linux 4.21)"
+Forwards the syscall to an attached listener in userspace to allow userspace to
+decide what to do with the syscall. If there is no attached listener (either
+because the filter was not installed with the
+.BR SECCOMP_FILTER_FLAG_NEW_LISTENER
+or because the fd was closed), the filter returns
+.BR ENOSYS
+similar to what happens when a filter returns
+.BR SECCOMP_RET_TRACE
+and there is no tracer. See "Userspace Notification" below for more details.
 .PP
 If an action value other than one of the above is specified,
 then the filter action is treated as either
@@ -693,10 +711,75 @@ Otherwise, if kernel auditing is enabled and the process is being audited
 the action is logged.
 .IP *
 Otherwise, the action is not logged.
+.SS Userspace Notification
+Interactin userspace notification functionality in seccomp is primarily done
+via file descriptor. This file descriptor can be obtained by passing
+.BR SECCOMP_FILTER_FLAG_NEW_LISTENER
+as a filter flag when installing a new filter.
+.PP
+Once an fd is obtained, userspace can wait for events using
+.BR poll ()
+or
+.BR ioctl ().
+The supported
+.BR ioctl ()
+operations on a notification fd are:
+.TP
+.BR SECCOMP_IOCTL_NOTIF_RECV
+The argument to this command should be a pointer to a struct seccomp_notif:
+.IP
+.in +4n
+.EX
+struct seccomp_notif {
+    __u64 id;
+    __u32 pid;
+    __u32 flags;
+    struct seccomp_data data;
+};
+.EE
+.in
+.IP
+The id field is a filter-unique id for this syscall, and should be supplied in
+the response. It can additionally be used in
+.BR SECCOMP_IOCTL_ID_VALID
+to test whether or not the request is still alive. The pid here is the pid of
+the task as visible from the listener's pid namespace. If the pid is not
+visible, it is 0. Flags is unused right now. struct seccomp_data is the same
+data that would be passed to a filter running in the kernel.
+.TP
+.BR SECCOMP_IOCTL_NOTIF_SEND
+The argument to this command should be a pointer to a struct seccomp_notif_resp:
+.IP
+.in +4n
+.EX
+struct seccomp_notif_resp {
+    __u64 id;
+    __s64 val;
+    __s32 error;
+    __u32 flags;
+};
+.EE
+.in
+.IP
+The id should be the id from struct seccomp_notif; if error is non-zero, it is
+used as the return value, otherwise val is. Flags must be 0 right now.
+.TP
+.BR SECCOMP_IOCTL_NOTIF_ID_VALID
+The argument to this command is just the id to be tested. There is a pid reuse
+issue where a task may make a syscall, die, its pid get re-used, and the
+listener may operate on the wrong pid. So the process for handling modifying a
+pid's state in some way would be to open the pid's resources (/proc/pid/mem or
+similar), do this call to verify that the id is still valid, and then use the
+resource. See the sample below for more detail.
+.PP
+A complete example is available in the kernel tree at
+.IR samples/seccomp/user-trap.c .
 .SH RETURN VALUE
 On success,
 .BR seccomp ()
-returns 0.
+returns 0, unless
+.BR SECCOMP_FILTER_FLAG_NEW_LISTENER
+was specified, in which case it returns the fd number for the new listener fd.
 On error, if
 .BR SECCOMP_FILTER_FLAG_TSYNC
 was used,
